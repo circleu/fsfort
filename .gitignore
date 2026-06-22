@@ -2,4 +2,5 @@ disk.img
 hexdiskout
 hexdisk.sh
 mkdisk.sh
-mkfsfort
+fmkfs
+fmkdir

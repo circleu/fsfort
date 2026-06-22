@@ -16,6 +16,7 @@
 #define DBSZLIM         BSZ
 #define IDBSZLIM(d)     (pow(PTRSPERB, d) * BSZ)
 #define DEPTHLIM        6
+#define MAXPATH         248
 
 #define ROOTINUM 1
 
