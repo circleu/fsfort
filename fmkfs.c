@@ -6,7 +6,6 @@
 
 char* target;
 long targetsz;
-
 sb_t* sb;
 char* bbmp;
 char* ibmp;
@@ -24,10 +23,11 @@ int main(int argc, char** argv) {
     dopen(argv[1]);
     dsetup();
 
-    if (icreat(0, __S_IFDIR) != 1) {
+    if (icreat(0, __S_IFDIR) != ROOTINUM) {
         exception("root is not located in inode 1");
     }
+    geti(ROOTINUM)->lcnt++;
 
-    dend();
+    dclose();
     return 0;
 }

@@ -44,7 +44,8 @@ typedef struct {
     long    mtime;
     int     lcnt;
     short   mode;
-    short   depth;
+    char    depth;
+    char    dbcnt;
     long    bnums[11];
 } i_t;
 typedef struct {

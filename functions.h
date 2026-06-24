@@ -16,10 +16,11 @@
 #define calc_bbmpsz(bcnt) padb(padiv(bcnt, 8))
 #define calc_ibmpsz(icnt) padb(padiv(icnt, 8))
 #define calc_itblsz(icnt) padb(icnt * ISZ)
-#define calc_depth(d) ((d - 1) / BPTRPERI)
 #define realbnum(bnum) (bnum - 1)
 #define realinum(inum) (inum - 1)
 #define btoaddr(bnum) (realbnum(bnum) * BSZ)
+#define getb(bnum) (&target[btoaddr(bnum)])
+#define geti(inum) (&itbl[realinum(inum)])
 
 #define exception(msg) {fprintf(stderr, "%s\n", msg);exit(EXIT_FAILURE);}
 #define fexception(msg, ...) {fprintf(stderr, msg"\n", __VA_ARGS__);exit(EXIT_FAILURE);}
@@ -42,6 +43,39 @@ long pow(long x, long y) {
         ret *= x;
     }
     return ret;
+}
+char* _strdup(const char* _s) {
+    char* s = (char*)calloc(strlen(_s) + 1, sizeof(char));
+    strcpy(s, _s);
+    
+    return s;
+}
+char* pathcat(const char* p1, const char* p2) {
+    char* p = (char*)calloc(strlen(p1) + strlen(p2) + 2, sizeof(char));
+    sprintf(p, "%s/%s", p1, p2);
+
+    return p;
+}
+long realisz(long inum) {
+    const char* err = "failed realisz()";
+    iexception(inum, err);
+
+    i_t* inode = geti(inum);
+    if (inode->depth == 0 && inode->dbcnt == 0) return 0;
+    inode->atime = time(NULL);
+    char d = inode->depth;
+
+    if (d == 0) {
+        char dbcnt = inode->dbcnt;
+        
+        return dbcnt * DBSZLIM;
+    }
+    else {
+        char ibcnt = BPTRPERI - inode->dbcnt;
+        char dbcnt = inode->dbcnt;
+
+        return ibcnt * IDBSZLIM(d) + dbcnt * DBSZLIM;
+    }
 }
 long balloc() {
     const char* err = "failed balloc()";
@@ -69,7 +103,7 @@ long bcalloc() {
             bbmp[i] |= (1 << j);
             sb->fbcnt--;
             bnum = i * 8 + j + 1;
-            memset(&target[btoaddr(bnum)], 0, BSZ);
+            memset(getb(bnum), 0, BSZ);
 
             return bnum;
         }
@@ -87,7 +121,7 @@ void bfree(long bnum) {
         bbmp[i] &= ~(1 << j);
         sb->fbcnt++;
     }
-    else return;
+    else fexception("%s: block %ld is not allocated", err, bnum);
 }
 long icalloc() {
     const char* err = "failed icalloc()";
@@ -99,11 +133,12 @@ long icalloc() {
             ibmp[i] |= (1 << j);
             sb->ficnt--;
             inum = i * 8 + j + 1;
-            memset(&itbl[realinum(inum)], 0, ISZ);
+            memset(geti(inum), 0, ISZ);
 
             return inum;
         }
     }
+    
     fexception("%s: out of inodes", err);
 }
 void ifree(long inum) {
@@ -117,13 +152,13 @@ void ifree(long inum) {
         ibmp[i] &= ~(1 << j);
         sb->ficnt++;
     }
-    else return;
+    else fexception("%s: inode %ld is not allocated", err, inum);
 }
 static void _iballoc(long bnum, char d) {
     const char* err = "failed iballoc()";
     bexception(bnum, err);
 
-    long* b = (long*)&target[btoaddr(bnum)];
+    long* b = (long*)getb(bnum);
 
     if (d == 0) return;
     for (short i = 0; i < PTRSPERB; i++) {
@@ -134,42 +169,39 @@ static void _iballoc(long bnum, char d) {
 void iballoc(long inum, long sz) {
     const char* err = "failed iballoc()";
     iexception(inum, err);
+    if (sz == 0) return;
 
-    i_t* inode = &itbl[realinum(inum)];
-    inode->sz = sz;
+    i_t* inode = geti(inum);
+    for (char i = 0; i < BPTRPERI; i++) {
+        if (inode->bnums[i] != 0) fexception("%s: block pointers are not zero", err);
+    }
     inode->atime = time(NULL);
     inode->mtime = time(NULL);
 
-    if (sz == 0) return;
-    else if (sz <= DBSZLIM * BPTRPERI) {
-        char bcnt = padiv(sz, DBSZLIM);
-        inode->depth = bcnt;
-        memset(inode->bnums, 0, sizeof(long) * BPTRPERI);
+    if (sz <= DBSZLIM * BPTRPERI) {
+        char dbcnt = padiv(sz, DBSZLIM);
+        inode->depth = 0;
+        inode->dbcnt = dbcnt;
 
-        for (char i = 0; i < bcnt; i++) {
+        for (char i = 0; i < dbcnt; i++) {
             inode->bnums[i] = bcalloc();
         }
         return;
     }
-    for (char i = 1; i < DEPTHLIM; i++) {
-        if (IDBSZLIM(i - 1) * BPTRPERI < sz <= IDBSZLIM(i) * BPTRPERI) {
-            char ibcnt = sz / IDBSZLIM(i);
-            char dbcnt;
-
-            if (sz % IDBSZLIM(i) > DBSZLIM * (BPTRPERI - ibcnt)) {
-                ibcnt++;
-            }
-
-            dbcnt = BPTRPERI - ibcnt;
-            inode->depth = i * BPTRPERI + ibcnt;
-            memset(inode->bnums, 0, sizeof(long) * BPTRPERI);
-
-            for (char j = 0; j < ibcnt; j++) {
+    for (char d = 1; d < DEPTHLIM; d++) {
+        if (IDBSZLIM(d - 1) * BPTRPERI < sz <= IDBSZLIM(d) * BPTRPERI) {
+            char ibcnt = sz / IDBSZLIM(d);
+            if (sz % IDBSZLIM(d) > DBSZLIM * (BPTRPERI - ibcnt)) ibcnt++;
+            char dbcnt = BPTRPERI - ibcnt;
+            inode->depth = d;
+            inode->dbcnt = dbcnt;
+            
+            for (char i = 0; i < ibcnt; i++) {
                 inode->bnums[i] = bcalloc();
-                _iballoc(inode->bnums[j], i);
+                _iballoc(inode->bnums[i], d);
             }
-            for (char j = ibcnt; j < BPTRPERI; j++) {
-                inode->bnums[j] = bcalloc();
+            for (char i = ibcnt; i < BPTRPERI; i++) {
+                inode->bnums[i] = bcalloc();
             }
             return;
         }
@@ -180,7 +212,7 @@ static void _ibfree(long bnum, char d) {
     const char* err = "failed ibfree()";
     bexception(bnum, err);
 
-    long* b = (long*)&target[btoaddr(bnum)];
+    long* b = (long*)getb(bnum);
 
     if (d == 0) return;
     for (short i = 0; i < PTRSPERB; i++) {
@@ -192,26 +224,29 @@ void ibfree(long inum) {
     const char* err = "failed ibfree()";
     iexception(inum, err);
 
-    i_t* inode = &itbl[realinum(inum)];
-    inode->sz = 0;
+    i_t* inode = geti(inum);
+    if (inode->depth == 0 && inode->dbcnt == 0) {
+        fexception("%s: no block has been allocated to inode %ld", err, inum);
+    }
     inode->atime = time(NULL);
     inode->mtime = time(NULL);
-
-    if (inode->depth == 0) return;
-    char d = calc_depth(inode->depth);
+    char d = inode->depth;
 
     if (d == 0) {
-        char bcnt = inode->depth;
+        char dbcnt = inode->dbcnt;
+        inode->depth = 0;
+        inode->dbcnt = 0;
 
-        for (char i = 0; i < bcnt; i++) {
+        for (char i = 0; i < dbcnt; i++) {
             bfree(inode->bnums[i]);
             inode->bnums[i] = 0;
         }
-        return;
     }
     else {
-        char ibcnt = inode->depth - d * BPTRPERI;
-        char dbcnt = BPTRPERI - ibcnt;
+        char ibcnt = BPTRPERI - inode->dbcnt;
+        char dbcnt = inode->dbcnt;
+        inode->depth = 0;
+        inode->dbcnt = 0;
 
         for (char i = 0; i < ibcnt; i++) {
             _ibfree(inode->bnums[i], d);
@@ -224,31 +259,10 @@ void ibfree(long inum) {
         }
     }
 }
-long realisz(long inum) {
-    const char* err = "failed realisz()";
-    iexception(inum, err);
-
-    i_t* inode = &itbl[realinum(inum)];
-    inode->atime = time(NULL);
-
-    if (inode->depth == 0) return 0;
-    char d = calc_depth(inode->depth);
-
-    if (d == 0) {
-        char bcnt = inode->depth;
-
-        return bcnt * DBSZLIM;
-    }
-    else {
-        char ibcnt = inode->depth - d * BPTRPERI;
-        char dbcnt = BPTRPERI - ibcnt;
-
-        return ibcnt * IDBSZLIM(d) + dbcnt * DBSZLIM;
-    }
-}
 long icreat(long sz, short mode) {
     long inum = icalloc();
-    i_t* inode = &itbl[realinum(inum)];
+    i_t* inode = geti(inum);
+
     inode->sz = sz;
     inode->ctime = time(NULL);
     inode->atime = time(NULL);
@@ -266,62 +280,62 @@ void idel(long inum) {
     ibfree(inum);
     ifree(inum);
 }
-static void _iread(long bnum, char d, char* ret, long* ptr) {
+static void _iread(long bnum, char d, char* buf, long* ptr) {
     const char* err = "failed iread()";
     bexception(bnum, err);
 
-    long* b = (long*)&target[btoaddr(bnum)];
+    long* b = (long*)getb(bnum);
 
     if (d == 0) {
-        memcpy(&ret[*ptr], b, BSZ);
+        memcpy(&buf[*ptr], b, BSZ);
         *ptr += BSZ;
 
         return;
     }
     for (short i = 0; i < PTRSPERB; i++) {
-        _iread(b[i], d - 1, ret, ptr);
+        _iread(b[i], d - 1, buf, ptr);
     }
 }
+// buffer size is real size.
 void* iread(long inum) {
     const char* err = "failed iread()";
     iexception(inum, err);
 
-    i_t* inode = &itbl[realinum(inum)];
+    i_t* inode = geti(inum);
+    if (inode->depth == 0 && inode->dbcnt == 0) return NULL;
     inode->atime = time(NULL);
-
-    if (inode->depth == 0) return NULL;
-    char d = calc_depth(inode->depth);
-    char* ret = (char*)mmap(NULL, realisz(inum), PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
-    if (ret == MAP_FAILED) pexception(err);
+    char d = inode->depth;
+    char* buf = (char*)mmap(NULL, realisz(inum), PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+    if (buf == MAP_FAILED) pexception(err);
     long ptr = 0;
 
     if (d == 0) {
-        char bcnt = inode->depth;
+        char dbcnt = inode->dbcnt;
 
-        for (char i = 0; i < bcnt; i++) {
-            memcpy(&ret[ptr], &target[btoaddr(inode->bnums[i])], BSZ);
+        for (char i = 0; i < dbcnt; i++) {
+            memcpy(&buf[ptr], getb(inode->bnums[i]), BSZ);
             ptr += BSZ;
         }
     }
     else {
-        char ibcnt = inode->depth - d * BPTRPERI;
-        char dbcnt = BPTRPERI - ibcnt;
+        char ibcnt = BPTRPERI - inode->dbcnt;
+        char dbcnt = inode->dbcnt;
 
-        for (char i = 0; i < ibcnt; i++) {
-            _iread(inode->bnums[i], d, ret, &ptr);
+        for (char i = 0; i < BPTRPERI; i++) {
+            _iread(inode->bnums[i], d, buf, &ptr);
         }
         for (char i = ibcnt; i < BPTRPERI; i++) {
-            memcpy(&ret[ptr], &target[btoaddr(inode->bnums[i])], BSZ);
+            memcpy(&buf[ptr], getb(inode->bnums[i]), BSZ);
             ptr += BSZ;
         }
     }
-    return ret;
+    return buf;
 }
 static void _iwrite(long bnum, char d, char* buf, long* ptr) {
     const char* err = "failed iwrite()";
     bexception(bnum, err);
 
-    long* b = (long*)&target[btoaddr(bnum)];
+    long* b = (long*)getb(bnum);
 
     if (d == 0) {
         memcpy(b, &buf[*ptr], BSZ);
@@ -337,66 +351,70 @@ void iwrite(long inum, char* buf, long sz) {
     const char* err = "failed iwrite()";
     iexception(inum, err);
 
-    i_t* inode = &itbl[realinum(inum)];
+    i_t* inode = geti(inum);
     long realsz = realisz(inum);
-    inode->atime = time(NULL);
-    inode->mtime = time(NULL);
 
-    if (realsz >= sz) {
-        char* newbuf = (char*)mmap(NULL, realsz, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
-        if (newbuf == MAP_FAILED) pexception(err);
-        memcpy(newbuf, buf, sz);
-        char d = calc_depth(inode->depth);
-        long ptr = 0;
+    if (realsz < sz) {
+        if (realsz != 0) ibfree(inum);
 
-        if (d == 0) {
-            char bcnt = inode->depth;
-
-            for (char i = 0; i < bcnt; i++) {
-                memcpy(&target[btoaddr(inode->bnums[i])], &newbuf[ptr], BSZ);
-                ptr += BSZ;
-            }
-        }
-        else {
-            char ibcnt = inode->depth - d * BPTRPERI;
-            char dbcnt = BPTRPERI - ibcnt;
-
-            for (char i = 0; i < ibcnt; i++) {
-                _iwrite(inode->bnums[i], d, newbuf, &ptr);
-            }
-            for (char i = 0; i < BPTRPERI; i++) {
-                memcpy(&target[btoaddr(inode->bnums[i])], &newbuf[ptr], BSZ);
-                ptr += BSZ;
-            }
-        }
-        if (munmap(newbuf, realsz) == -1) pexception(err);
-    }
-    else {
         long newinum = icalloc();
-        i_t* newinode = &itbl[realinum(newinum)];
+        i_t* newinode = geti(newinum);
         *newinode = *inode;
         iballoc(newinum, sz);
         iwrite(newinum, buf, sz);
         *inode = *newinode;
-        idel(newinum);
+        ifree(newinum);
+    }
+    else {
+        inode->sz = sz;
+        inode->atime = time(NULL);
+        inode->mtime = time(NULL);
+
+        char* newbuf = (char*)mmap(NULL, realsz, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+        if (newbuf == MAP_FAILED) pexception(err);
+        memcpy(newbuf, buf, sz);
+        char d = inode->depth;
+        long ptr = 0;
+
+        if (d == 0) {
+            char dbcnt = inode->dbcnt;
+
+            for (char i = 0; i < dbcnt; i++) {
+                memcpy(getb(inode->bnums[i]), &newbuf[ptr], BSZ);
+                ptr += BSZ;
+            }
+        }
+        else {
+            char ibcnt = BPTRPERI - inode->dbcnt;
+            char dbcnt = inode->dbcnt;
+
+            for (char i = 0; i < ibcnt; i++) {
+                _iwrite(inode->bnums[i], d, newbuf, &ptr);
+            }
+            for (char i = ibcnt; i < BPTRPERI; i++) {
+                memcpy(getb(inode->bnums[i]), &newbuf[ptr], BSZ);
+                ptr += BSZ;
+            }
+        }
+        if (munmap(newbuf, realsz) == -1) pexception(err);
     }
 }
 void idecreat(long inum, const char* name, short mode) {
     const char* err = "failed idecreat()";
     iexception(inum, err);
 
-    i_t* inode = &itbl[realinum(inum)];
-    long realsz = realisz(inum);
-
+    i_t* inode = geti(inum);
     if (!S_ISDIR(inode->mode)) fexception("%s: inode %d is not directory", err, inum);
-
+    long realsz = realisz(inum);
     de_t* buf = (de_t*)iread(inum);
 
     for (long i = 0; i < realsz / DESZ; i++) {
         if (buf[i].inum == 0) {
             buf[i].inum = icreat(0, mode);
+
             strncpy(buf[i].name, name, MAXPATH);
             iwrite(inum, (char*)buf, realsz);
+            geti(buf[i].inum)->lcnt++;
 
             if (munmap(buf, realsz) == -1) pexception(err);
             return;
@@ -410,22 +428,20 @@ void idecreat(long inum, const char* name, short mode) {
         if (munmap(buf, realsz) == -1) pexception(err);
     }
 
-    long i = realsz / DESZ;
-    newbuf[i].inum = icreat(0, mode);
-    strncpy(newbuf[i].name, name, MAXPATH);
     iwrite(inum, (char*)newbuf, realsz + DESZ);
+    idecreat(inum, name, mode);
     if (munmap(newbuf, realsz + DESZ) == -1) pexception(err);
 }
-long ifind(char* path) {
+long ifind(const char* path) {
     const char* err = "failed ifind()";
     if (path[0] != '/') fexception("%s: path must be started with root directory(/)", err);
-    path++;
 
-    char* tok = strtok(path, "/");
+    char* pathcopy = _strdup(path);
+    char* tok = strtok(pathcopy, "/");
     de_t* buf = NULL;
     long inum = ROOTINUM;
-    long realsz;
-    char isok;
+    long realsz = 0;
+    char isok = 0;
 
     while (tok != NULL) {
         isok = 0;
@@ -433,40 +449,46 @@ long ifind(char* path) {
         buf = (de_t*)iread(inum);
 
         for (long i = 0; i < realsz / DESZ; i++) {
-            if (!strcmp(buf[i].name, tok)) {
+            if (!strncmp(buf[i].name, tok, MAXPATH)) {
                 inum = buf[i].inum;
-                munmap(buf, realsz);
+                if (munmap(buf, realsz) == -1) pexception(err);
                 tok = strtok(NULL, "/");
                 isok = 1;
+                break;
             }
         }
-        if (!isok) fexception("%s: could not find file or directory '%s'", err, --path);
+        if (!isok) {
+            free(pathcopy);
+            fexception("%s: could not find file or directory '%s'", err, path);
+        }
     }
+    free(pathcopy);
     return inum;
 }
-void dopen(const char* fname) {
+void dopen(const char* path) {
     const char* err = "failed dopen()";
 
-    int fd = open(fname, O_RDWR);
+    int fd = open(path, O_RDWR);
     if (fd == -1) pexception(err);
 
-    struct stat buf;
-    if (fstat(fd, &buf) == -1) pexception(err);
+    struct stat stat;
+    if (fstat(fd, &stat) == -1) pexception(err);
 
-    if (S_ISREG(buf.st_mode)) {
-        targetsz = buf.st_size;
+    if (S_ISREG(stat.st_mode)) {
+        targetsz = stat.st_size;
         target = (char*)mmap(NULL, targetsz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if (target == MAP_FAILED) pexception(err);
         if (close(fd) == -1) pexception(err);
     }
-    else fexception("%s: '%s' is not a regular file", err, fname);
+    else fexception("%s: '%s' is not a regular file", err, path);
 }
 void dsetup() {
-    memset(&target[btoaddr(SBOFF)], 0, BSZ);
-    sb = (sb_t*)&target[btoaddr(SBOFF)];
+    sb = (sb_t*)getb(SBOFF);
+    memset(sb, 0, BSZ);
     
     uuid_generate((unsigned char*)sb->uuid);
-    memcpy(sb->magic, "FSFORT\0", 8);
+    memcpy(sb->magic, "FSFORT\0\0", 8);
+    
 
     sb->bcnt = calc_bcnt(targetsz);
     sb->fbcnt = sb->bcnt;
@@ -481,13 +503,13 @@ void dsetup() {
     sb->itblsz = calc_itblsz(sb->icnt);
     sb->fstdatoff = sb->itbloff + sb->itblsz / BSZ;
 
-    bbmp = &target[btoaddr(sb->bbmpoff)];
-    ibmp = &target[btoaddr(sb->ibmpoff)];
-    itbl = (i_t*)&target[btoaddr(sb->itbloff)];
-    fstdat = &target[btoaddr(sb->fstdatoff)];
+    bbmp = getb(sb->bbmpoff);
+    ibmp = getb(sb->ibmpoff);
+    itbl = (i_t*)getb(sb->itbloff);
+    fstdat = getb(sb->fstdatoff);
 
-    memset(&target[btoaddr(sb->bbmpoff)], 0, sb->bbmpsz);
-    memset(&target[btoaddr(sb->ibmpoff)], 0, sb->ibmpsz);
+    memset(getb(sb->bbmpoff), 0, sb->bbmpsz);
+    memset(getb(sb->ibmpoff), 0, sb->ibmpsz);
 
     for (long i = 0; i < SBOFF; i++) {
         balloc();
@@ -499,16 +521,16 @@ void dsetup() {
 void dget() {
     const char* err = "failed dget()";
 
-    sb = (sb_t*)&target[btoaddr(SBOFF)];
-    if (memcmp(sb->magic, "FSFORT\0", 8)) fexception("%s: magic number not matched", err);
+    sb = (sb_t*)getb(SBOFF);
+    if (memcmp(sb->magic, "FSFORT\0\0", 8)) fexception("%s: magic number not matched", err);
 
-    bbmp = &target[btoaddr(sb->bbmpoff)];
-    ibmp = &target[btoaddr(sb->ibmpoff)];
-    itbl = (i_t*)&target[btoaddr(sb->itbloff)];
-    fstdat = &target[btoaddr(sb->fstdatoff)];
+    bbmp = getb(sb->bbmpoff);
+    ibmp = getb(sb->ibmpoff);
+    itbl = (i_t*)getb(sb->itbloff);
+    fstdat = getb(sb->fstdatoff);
 }
-void dend() {
-    const char* err = "failed dend()";
+void dclose() {
+    const char* err = "failed dclose()";
 
     if (munmap(target, targetsz) == -1) pexception(err);
 }

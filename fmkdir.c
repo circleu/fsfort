@@ -6,7 +6,6 @@
 
 char* target;
 long targetsz;
-
 sb_t* sb;
 char* bbmp;
 char* ibmp;
@@ -28,6 +27,6 @@ int main(int argc, char** argv) {
     long inum = ifind(argv[2]);
     idecreat(inum, argv[3], __S_IFDIR);
 
-    dend();
+    dclose();
     return 0;
 }
